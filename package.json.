@@ -1,0 +1,11 @@
+{
+  "name": "social-engine-ai360plus",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node socialWorker.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.0"
+  }
+}
