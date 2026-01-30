@@ -121,27 +121,92 @@ async function performAction(job) {
     lead,
   });
 
-  const { error: ierr } = await supabase.from("social_outputs").insert({
-    org_id,
-    lead_id,
-    vertical_key: payload?.verticalKey ?? vertical_key ?? "general",
-    status: "draft",
-    channel: "multi",
-    title: kit.title ?? null,
-    hook: kit.hook ?? null,
-    caption: kit.caption ?? null,
-    cta: kit.cta ?? null,
-    hashtags: kit.hashtags ?? [],
-    image_prompts: kit.image_prompts ?? [],
-    assets: [],
-    meta: kit.style ?? {},
-  });
+  const { data: outRow, error: outErr } = await supabase
+  .from("social_outputs")
+  .insert({...})  // mantén el mismo contenido del insert
+  .select("id, org_id")
+  .single();
 
-  if (ierr) throw ierr;
+if (outErr) throw outErr;
 
-  log("[SOCIAL] draft created in social_outputs");
-  return { ok: true };
-}
+// Encolar generación de assets
+await supabase.from("social_queue").insert({
+  org_id,
+  lead_id,
+  vertical_key: payload?.verticalKey ?? vertical_key ?? "general",
+  action: "generate_assets",
+  payload: { outputId: outRow.id }
+});
+
+log("[SOCIAL] draft created and assets queued");
+return { ok: true };
+
+
+
+    // 2) generate_assets: crea imágenes y guarda URLs en social_outputs.assets
+  if (action === "generate_assets") {
+    const outputId = payload?.outputId;
+    if (!outputId) throw new Error("Missing payload.outputId");
+
+    const { data: out, error: oerr } = await supabase
+      .from("social_outputs")
+      .select("id, org_id, lead_id, vertical_key, image_prompts, assets")
+      .eq("id", outputId)
+      .eq("org_id", org_id)
+      .single();
+
+    if (oerr) throw oerr;
+
+    const prompts = Array.isArray(out.image_prompts) ? out.image_prompts : [];
+    if (prompts.length === 0) {
+      return { ok: true, skipped: true, reason: "no image_prompts" };
+    }
+
+    const max = Math.min(3, prompts.length);
+    const newAssets = [];
+
+    for (let i = 0; i < max; i++) {
+      const p = prompts[i];
+      const promptText = typeof p === "string" ? p : p?.prompt;
+      if (!promptText) continue;
+
+      const finalPrompt =
+        `Crea una imagen publicitaria para redes sociales. Estilo profesional, alta claridad. ` +
+        `Sin texto legible (o mínimo). ` +
+        `Prompt: ${promptText}`;
+
+      const buffer = await generateOneImage(finalPrompt);
+
+      const uploaded = await uploadToStorage({
+        orgId: org_id,
+        outputId: out.id,
+        index: i + 1,
+        buffer,
+      });
+
+      newAssets.push({
+        type: "image",
+        url: uploaded.url,
+        path: uploaded.path,
+        prompt: promptText,
+      });
+    }
+
+    const mergedAssets = Array.isArray(out.assets) ? [...out.assets, ...newAssets] : newAssets;
+
+    const { error: uerr } = await supabase
+      .from("social_outputs")
+      .update({
+        assets: mergedAssets,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", out.id)
+      .eq("org_id", org_id);
+
+    if (uerr) throw uerr;
+
+    return { ok: true, generated: newAssets.length };
+  }
 // Audit trail en audit_log
 async function audit(orgId, action, payload) {
   const SYSTEM_USER_ID = process.env.SYSTEM_USER_ID; // uuid sistema
