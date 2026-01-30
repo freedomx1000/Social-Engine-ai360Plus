@@ -1,4 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
+import OpenAI from "openai";
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY");
+
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -34,21 +41,107 @@ function backoffMs(attempts) {
   return Math.min(30000, attempts * BACKOFF_BASE_MS);
 }
 
-// Stub: aquí luego conectas Meta/LinkedIn/etc.
-async function performAction(job) {
-  const { action, payload, org_id, lead_id, move_id } = job;
-  log("[SOCIAL] perform", {
-    action,
-    org_id,
-    lead_id,
-    move_id,
-    title: payload?.title,
-  });
+async function fetchLeadContext(orgId, leadId) {
+  const { data, error } = await supabase
+    .from("leads")
+    .select(
+      "id, title, name, company, city, country, phone, email, notes, meta, source"
+    )
+    .eq("org_id", orgId)
+    .eq("id", leadId)
+    .single();
 
-  // Simula éxito
-  return { ok: true };
+  if (error) throw error;
+  return data;
 }
 
+async function generateSocialKit({ verticalKey, goal, channels, lead }) {
+  const prompt = {
+    role: "user",
+    content: [
+      "Eres un copywriter de respuesta directa para RRSS.",
+      "Genera un pack listo para publicar que atraiga al gran público pero sin humo.",
+      "",
+      `Vertical: ${verticalKey}`,
+      `Objetivo: ${goal}`,
+      `Canales: ${channels.join(", ")}`,
+      "",
+      "Contexto del lead/cliente (puede venir incompleto):",
+      JSON.stringify(lead ?? {}, null, 2),
+      "",
+      "Devuelve SOLO JSON válido con esta forma:",
+      `{
+        "title": "...",
+        "hook": "...",
+        "caption": "...",
+        "cta": "...",
+        "hashtags": ["#..."],
+        "image_prompts": [
+          {"type":"image","prompt":"..."},
+          {"type":"image","prompt":"..."},
+          {"type":"image","prompt":"..."}
+        ],
+        "style": {"tone":"...","voice":"...","format":"..."}
+      }`,
+      "",
+      "Reglas:",
+      "- Español neutro (si no se especifica país).",
+      "- Evita claims ilegales (salud/finanzas), y evita promesas absolutas.",
+      "- Copy corto, claro, con una idea potente.",
+      "- Que parezca humano.",
+    ].join("\n"),
+  };
+
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    temperature: 0.7,
+    messages: [prompt],
+    response_format: { type: "json_object" },
+  });
+
+  const text = resp.choices?.[0]?.message?.content ?? "{}";
+  return JSON.parse(text);
+}
+
+// Stub: aquí luego conectas Meta/LinkedIn/etc.
+async function performAction(job) {
+  const { action, payload, org_id, lead_id, vertical_key } = job;
+
+  if (action !== "generate_post") {
+    log("[SOCIAL] skip action", action);
+    return { ok: true, skipped: true };
+  }
+
+  const lead = lead_id ? await fetchLeadContext(org_id, lead_id) : null;
+
+  const kit = await generateSocialKit({
+    verticalKey: payload?.verticalKey ?? vertical_key ?? "general",
+    goal: payload?.goal ?? "sell",
+    channels: payload?.channels ?? ["instagram", "facebook", "linkedin"],
+    lead,
+  });
+
+  const { error: ierr } = await supabase.from("social_outputs").insert({
+    org_id,
+    lead_id,
+    vertical_key: payload?.verticalKey ?? vertical_key ?? "general",
+    status: "draft",
+    channel: "multi",
+    title: kit.title ?? null,
+    hook: kit.hook ?? null,
+    caption: kit.caption ?? null,
+    cta: kit.cta ?? null,
+    hashtags: kit.hashtags ?? [],
+    image_prompts: kit.image_prompts ?? [],
+    assets: [],
+    meta: kit.style ?? {},
+  });
+
+  if (ierr) throw ierr;
+
+  log("[SOCIAL] draft created in social_outputs");
+  return { ok: true };
+}
 // Audit trail en audit_log
 async function audit(orgId, action, payload) {
   const SYSTEM_USER_ID = process.env.SYSTEM_USER_ID; // uuid sistema
