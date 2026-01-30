@@ -6,7 +6,6 @@ if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY");
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -50,7 +49,6 @@ async function fetchLeadContext(orgId, leadId) {
     .eq("org_id", orgId)
     .eq("id", leadId)
     .single();
-
   if (error) throw error;
   return data;
 }
@@ -103,47 +101,100 @@ async function generateSocialKit({ verticalKey, goal, channels, lead }) {
   return JSON.parse(text);
 }
 
-// Stub: aquí luego conectas Meta/LinkedIn/etc.
+// Helper: generar UNA imagen con DALL-E 3 (b64_json)
+async function generateOneImage(promptText) {
+  const finalPrompt =
+    `Imagen cuadrada 1:1 (1024x1024), estilo publicitario premium, sin texto, sin marcas de agua. ` +
+    `Composición clara, sujeto principal centrado, iluminación profesional, alta nitidez. ` +
+    `Prompt creativo: ${promptText}`;
+
+  const resp = await openai.images.generate({
+    model: "dall-e-3",
+    prompt: finalPrompt,
+    n: 1,
+    size: "1024x1024",
+    response_format: "b64_json",
+  });
+
+  const b64 = resp.data[0].b64_json;
+  if (!b64) throw new Error("No b64_json in DALL-E response");
+  return Buffer.from(b64, "base64");
+}
+
+// Helper: subir buffer a Supabase Storage (bucket social-assets)
+async function uploadToStorage({ orgId, outputId, index, buffer }) {
+  const ext = "png";
+  const filename = `${orgId}/${outputId}_${index}.${ext}`;
+
+  const { data, error } = await supabase.storage
+    .from("social-assets")
+    .upload(filename, buffer, {
+      contentType: `image/${ext}`,
+      upsert: true,
+    });
+
+  if (error) throw error;
+
+  const { data: publicUrlData } = supabase.storage
+    .from("social-assets")
+    .getPublicUrl(filename);
+
+  return {
+    path: data.path,
+    url: publicUrlData.publicUrl,
+  };
+}
+
+// Acción principal del worker
 async function performAction(job) {
   const { action, payload, org_id, lead_id, vertical_key } = job;
 
-  if (action !== "generate_post") {
-    log("[SOCIAL] skip action", action);
-    return { ok: true, skipped: true };
+  // 1) generate_post: crea el draft social y encola generate_assets
+  if (action === "generate_post") {
+    const lead = lead_id ? await fetchLeadContext(org_id, lead_id) : null;
+
+    const kit = await generateSocialKit({
+      verticalKey: payload?.verticalKey ?? vertical_key ?? "general",
+      goal: payload?.goal ?? "sell",
+      channels: payload?.channels ?? ["instagram", "facebook", "linkedin"],
+      lead,
+    });
+
+    const { data: outRow, error: outErr } = await supabase
+      .from("social_outputs")
+      .insert({
+        org_id,
+        lead_id,
+        vertical_key: payload?.verticalKey ?? vertical_key ?? "general",
+        title: kit.title ?? "",
+        hook: kit.hook ?? "",
+        caption: kit.caption ?? "",
+        cta: kit.cta ?? "",
+        hashtags: kit.hashtags ?? [],
+        image_prompts: kit.image_prompts ?? [],
+        style: kit.style ?? {},
+        assets: [],
+        status: "draft",
+      })
+      .select("id, org_id")
+      .single();
+
+    if (outErr) throw outErr;
+
+    // Encolar generación de assets
+    await supabase.from("social_queue").insert({
+      org_id,
+      lead_id,
+      vertical_key: payload?.verticalKey ?? vertical_key ?? "general",
+      action: "generate_assets",
+      payload: { outputId: outRow.id },
+    });
+
+    log("[SOCIAL] draft created and assets queued");
+    return { ok: true };
   }
 
-  const lead = lead_id ? await fetchLeadContext(org_id, lead_id) : null;
-
-  const kit = await generateSocialKit({
-    verticalKey: payload?.verticalKey ?? vertical_key ?? "general",
-    goal: payload?.goal ?? "sell",
-    channels: payload?.channels ?? ["instagram", "facebook", "linkedin"],
-    lead,
-  });
-
-  const { data: outRow, error: outErr } = await supabase
-  .from("social_outputs")
-  .insert({...})  // mantén el mismo contenido del insert
-  .select("id, org_id")
-  .single();
-
-if (outErr) throw outErr;
-
-// Encolar generación de assets
-await supabase.from("social_queue").insert({
-  org_id,
-  lead_id,
-  vertical_key: payload?.verticalKey ?? vertical_key ?? "general",
-  action: "generate_assets",
-  payload: { outputId: outRow.id }
-});
-
-log("[SOCIAL] draft created and assets queued");
-return { ok: true };
-
-
-
-    // 2) generate_assets: crea imágenes y guarda URLs en social_outputs.assets
+  // 2) generate_assets: crea imágenes y guarda URLs en social_outputs.assets
   if (action === "generate_assets") {
     const outputId = payload?.outputId;
     if (!outputId) throw new Error("Missing payload.outputId");
@@ -170,13 +221,7 @@ return { ok: true };
       const promptText = typeof p === "string" ? p : p?.prompt;
       if (!promptText) continue;
 
-      const finalPrompt =
-        `Crea una imagen publicitaria para redes sociales. Estilo profesional, alta claridad. ` +
-        `Sin texto legible (o mínimo). ` +
-        `Prompt: ${promptText}`;
-
-      const buffer = await generateOneImage(finalPrompt);
-
+      const buffer = await generateOneImage(promptText);
       const uploaded = await uploadToStorage({
         orgId: org_id,
         outputId: out.id,
@@ -192,7 +237,9 @@ return { ok: true };
       });
     }
 
-    const mergedAssets = Array.isArray(out.assets) ? [...out.assets, ...newAssets] : newAssets;
+    const mergedAssets = Array.isArray(out.assets)
+      ? [...out.assets, ...newAssets]
+      : newAssets;
 
     const { error: uerr } = await supabase
       .from("social_outputs")
@@ -205,8 +252,15 @@ return { ok: true };
 
     if (uerr) throw uerr;
 
+    log("[SOCIAL] assets generated", { outputId, count: newAssets.length });
     return { ok: true, generated: newAssets.length };
   }
+
+  // Otras acciones: skip
+  log("[SOCIAL] skip action", action);
+  return { ok: true, skipped: true };
+}
+
 // Audit trail en audit_log
 async function audit(orgId, action, payload) {
   const SYSTEM_USER_ID = process.env.SYSTEM_USER_ID; // uuid sistema
@@ -267,11 +321,12 @@ async function claimOne() {
     .eq("id", job.id)
     .eq("status", "pending")
     .select(
-      "id,status,claimed_at,attempts,action,payload,org_id,lead_id,move_id,created_at,updated_at,last_error"
+      "id,status,claimed_at,attempts,action,payload,org_id,lead_id,move_id,vertical_key,created_at,updated_at,last_error"
     );
 
   if (uerr) throw uerr;
   if (!upd || upd.length === 0) return null;
+
   return upd[0];
 }
 
@@ -322,7 +377,6 @@ async function markFail(job, err) {
 
 async function main() {
   log("[WORKER] Social Engine started");
-
   let lastStuckSweep = 0;
 
   while (true) {
