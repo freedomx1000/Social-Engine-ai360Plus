@@ -1,44 +1,83 @@
 import { supabase } from "../supabase.js";
-import type { SocialJobRow } from "../types.js";
+import type { CrmLeadActivityRow, SocialJobRow, SocialOutputInsert } from "../types.js";
 
+/**
+ * Genera un borrador en social_outputs a partir de crm_lead_activity (+ payload/meta)
+ * SIN IA todavía: solo estructura y texto base.
+ */
 export async function handleGenerateAssets(job: SocialJobRow) {
-  // Aquí va tu pipeline real (copy, imagen, vídeo, etc.)
-  // Por ahora: dejamos huella determinista y cerramos el job correctamente.
-
-  const resultPayload = {
-    ok: true,
-    generated: {
-      kind: "assets_stub",
-      ts: new Date().toISOString(),
-    },
-    input: job.payload ?? {},
-  };
-
-  // Opcional: escribir actividad "worker_done" en crm_lead_activity (si existe)
-  // (si no quieres esto, lo quitamos)
-  try {
-    await supabase.from("crm_lead_activity").insert({
-      org_id: job.org_id,
-      lead_id: job.lead_id,
-      kind: "worker_done",
-      message: "Social job processed: generate_assets",
-      meta: { job_type: job.job_type },
-      payload: resultPayload,
-    });
-  } catch {
-    // No bloquea el flujo si la tabla o columnas cambian
+  if (!job.activity_id) {
+    return { ok: false, reason: "missing_activity_id" as const };
   }
 
-  // Marcar el job DONE
-  const { error } = await supabase
-    .from("social_jobs")
-    .update({
-      status: "done",
-      payload: { ...(job.payload ?? {}), result: resultPayload },
-      updated_at: new Date().toISOString(),
-    })
-    .eq("activity_id", job.activity_id)
-    .eq("job_type", job.job_type);
+  const { data: act, error: actErr } = await supabase
+    .from("crm_lead_activity")
+    .select("*")
+    .eq("id", job.activity_id)
+    .single<CrmLeadActivityRow>();
 
-  if (error) throw error;
+  if (actErr || !act) {
+    return { ok: false, reason: "activity_not_found" as const, detail: actErr?.message };
+  }
+
+  // Derivamos algunos campos base desde payload/meta
+  const p = act.payload ?? {};
+  const m = act.meta ?? {};
+
+  const verticalKey: string | null =
+    p.vertical_key ?? m.vertical_key ?? p.vertical ?? m.vertical ?? null;
+
+  const channel: string = p.channel ?? m.channel ?? "multi";
+
+  const hook: string | null =
+    p.hook ?? m.hook ?? (act.message ? `Idea: ${act.message}` : null);
+
+  const cta: string | null = p.cta ?? m.cta ?? "Escríbeme y te digo cómo hacerlo.";
+
+  // Hashtags: aceptamos array o string “#a #b”
+  let hashtags: string[] | null = null;
+  const rawHash = p.hashtags ?? m.hashtags;
+  if (Array.isArray(rawHash)) hashtags = rawHash.map(String);
+  else if (typeof rawHash === "string") hashtags = rawHash.split(/\s+/).filter(Boolean);
+
+  const title: string | null = p.title ?? m.title ?? null;
+  const caption: string | null = p.caption ?? m.caption ?? null;
+
+  // prompts de imagen: por ahora dejamos algo mínimo en jsonb
+  const image_prompts = p.image_prompts ?? m.image_prompts ?? [
+    { prompt: "Foto estilo marca, fondo limpio, enfoque en producto/servicio, alta calidad" }
+  ];
+
+  const insert: SocialOutputInsert = {
+    org_id: act.org_id,
+    lead_id: act.lead_id,
+    vertical_key: verticalKey,
+    status: "draft",
+    channel,
+    title,
+    caption,
+    hashtags,
+    hook,
+    cta,
+    image_prompts,
+    assets: [],
+    meta: {
+      source: "crm_lead_activity",
+      activity_id: act.id,
+      kind: act.kind,
+      job_id: job.id
+    }
+  };
+
+  const { data: out, error: outErr } = await supabase
+    .from("social_outputs")
+    .insert(insert)
+    .select("id")
+    .single();
+
+  if (outErr) {
+    return { ok: false, reason: "insert_social_outputs_failed" as const, detail: outErr.message };
+  }
+
+  return { ok: true, social_output_id: out?.id as string };
 }
