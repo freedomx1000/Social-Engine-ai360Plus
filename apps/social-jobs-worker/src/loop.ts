@@ -88,11 +88,10 @@ export async function runLoop() {
       if (job.job_type === "generate_assets") {
         const res = await generate_assets(job);
         if (!res.ok) {
-          console.log(`[${WORKER_ID}] failed generate_assets: ${res.reason}`);
-          await markFailed(job, String(res.reason));
-          continue;
-        }
-      } else {
+        console.log(`[${WORKER_ID}] failed generate_assets for job ${job.id}`);
+        await markFailed(job, "generate_assets_failed");
+        continue;
+      }
         // job_type desconocido: lo fallamos (o lo dejamos queued)
         await markFailed(job, `unknown_job_type:${job.job_type}`);
         continue;
