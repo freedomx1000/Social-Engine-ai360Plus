@@ -3,10 +3,9 @@
 import { randomUUID } from "crypto";
 
 // AJUSTA ESTE IMPORT SI TU EXPORT SE LLAMA DISTINTO
-// - si en tu src/supabase.ts exportas `supabaseAdmin`, déjalo tal cual
+// - si en tu src/supabase.ts exportas `supabase`, déjalo tal cual
 // - si exportas `supabase`, cambia el nombre aquí.
-import { supabaseAdmin } from "../supabase";
-
+import { supabase } from "../supabase";
 type GenerateAssetsResult = {
   title: string;
   hook: string;
