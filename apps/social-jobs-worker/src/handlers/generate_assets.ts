@@ -293,6 +293,8 @@ Contexto:
   const insertRow = {
     org_id,
     lead_id,
+        activity_id: job?.activity_id ?? null,
+        job_id: job?.id ?? null,
     vertical_key,
     status: "draft",
     channel,
