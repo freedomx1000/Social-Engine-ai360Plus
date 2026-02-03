@@ -1,64 +1,44 @@
 import { supabase } from "../supabase.js";
-import type { SocialJobRow, LeadRow, LeadActivityRow } from "../types.js";
+import type { SocialJobRow } from "../types.js";
 
 export async function handleGenerateAssets(job: SocialJobRow) {
-  // 1) Cargar lead
-  const { data: lead, error: leadErr } = await supabase
-    .from("leads")
-    .select("*")
-    .eq("id", job.lead_id)
-    .eq("org_id", job.org_id)
-    .is("deleted_at", null)
-    .maybeSingle<LeadRow>();
+  // Aquí va tu pipeline real (copy, imagen, vídeo, etc.)
+  // Por ahora: dejamos huella determinista y cerramos el job correctamente.
 
-  if (leadErr || !lead) {
-    throw new Error(`Lead not found or access denied. leadErr=${leadErr?.message ?? "null"}`);
-  }
-
-  // 2) Cargar actividad origen (crm_lead_activity)
-  const { data: act, error: actErr } = await supabase
-    .from("crm_lead_activity")
-    .select("*")
-    .eq("id", job.activity_id)
-    .eq("org_id", job.org_id)
-    .maybeSingle<LeadActivityRow>();
-
-  if (actErr || !act) {
-    throw new Error(`Activity not found. actErr=${actErr?.message ?? "null"}`);
-  }
-
-  // 3) Generar resultado "stub" (luego lo conectamos a Social Engine real)
-  const assets_stub = {
-    kind: "generate_assets_stub",
-    lead: { id: lead.id, name: lead.name, email: lead.email },
-    activity: { id: act.id, kind: act.kind, type: act.type },
-    generated_at: new Date().toISOString()
+  const resultPayload = {
+    ok: true,
+    generated: {
+      kind: "assets_stub",
+      ts: new Date().toISOString(),
+    },
+    input: job.payload ?? {},
   };
 
-  // 4) Registrar nueva actividad de sistema (para auditoría)
-  const { error: insErr } = await supabase.from("crm_lead_activity").insert({
-    org_id: job.org_id,
-    lead_id: job.lead_id,
-    kind: "system",
-    type: "assets_generated",
-    message: "Assets generated (stub).",
-    meta: { job_id: job.id, source_activity_id: job.activity_id },
-    payload: assets_stub
-  });
+  // Opcional: escribir actividad "worker_done" en crm_lead_activity (si existe)
+  // (si no quieres esto, lo quitamos)
+  try {
+    await supabase.from("crm_lead_activity").insert({
+      org_id: job.org_id,
+      lead_id: job.lead_id,
+      kind: "worker_done",
+      message: "Social job processed: generate_assets",
+      meta: { job_type: job.job_type },
+      payload: resultPayload,
+    });
+  } catch {
+    // No bloquea el flujo si la tabla o columnas cambian
+  }
 
-  if (insErr) throw new Error(`Failed to insert activity: ${insErr.message}`);
-
-  // 5) Actualizar lead.last_activity_*
-  const { error: updErr } = await supabase
-    .from("leads")
+  // Marcar el job DONE
+  const { error } = await supabase
+    .from("social_jobs")
     .update({
-      last_activity_at: new Date().toISOString(),
-      last_activity_kind: "assets_generated"
+      status: "done",
+      payload: { ...(job.payload ?? {}), result: resultPayload },
+      updated_at: new Date().toISOString(),
     })
-    .eq("id", lead.id)
-    .eq("org_id", job.org_id);
+    .eq("activity_id", job.activity_id)
+    .eq("job_type", job.job_type);
 
-  if (updErr) throw new Error(`Failed to update lead last_activity: ${updErr.message}`);
-
-  return { ok: true, assets_stub };
+  if (error) throw error;
 }
