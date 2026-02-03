@@ -1,6 +1,8 @@
+import { randomUUID } from "crypto";
 import { supabase } from "./supabase.js";
 import type { SocialJobRow } from "./types.js";
 import { generate_assets } from "./handlers/generate_assets.js";
+
 const WORKER_ID =
   process.env.SOCIAL_WORKER_ID || `social-jobs-worker-${Math.random().toString(16).slice(2, 8)}`;
 
@@ -28,42 +30,71 @@ async function claimNext(): Promise<SocialJobRow | null> {
   return rows.length ? rows[0] : null;
 }
 
-async function markDone(jobId: string) {
+/**
+ * ✅ OBSERVABILIDAD PRO: Marca job como "running" al empezar a procesarlo
+ * Incrementa attempts y guarda trace_id
+ */
+async function markRunning(job: SocialJobRow, trace_id: string) {
   const { error } = await supabase
     .from("social_jobs")
-    .update({ status: "done", locked_at: null, locked_by: null })
+    .update({
+      status: "running",
+      attempts: (job.attempts ?? 0) + 1,
+      last_trace_id: trace_id
+    })
+    .eq("id", job.id)
+    .eq("locked_by", WORKER_ID);
+
+  if (error) throw error;
+}
+
+/**
+ * ✅ OBSERVABILIDAD PRO: Marca job como "done" con trace_id
+ */
+async function markDone(jobId: string, trace_id: string) {
+  const { error } = await supabase
+    .from("social_jobs")
+    .update({
+      status: "done",
+      last_trace_id: trace_id,
+      locked_at: null,
+      locked_by: null
+    })
     .eq("id", jobId)
     .eq("locked_by", WORKER_ID);
 
   if (error) throw error;
 }
 
-async function markFailed(job: SocialJobRow, reason: string) {
+/**
+ * ✅ OBSERVABILIDAD PRO: Marca job como "failed" con error details
+ * Guarda: last_error, last_error_at, last_trace_id
+ */
+async function markFailed(job: SocialJobRow, error: Error | string, trace_id: string) {
   const attempts = Number(job.attempts ?? 0) + 1;
   const maxAttempts = Number(job.max_attempts ?? 5);
-
   const nextStatus = attempts >= maxAttempts ? "failed" : "queued";
 
-  const payload = {
-    ...(job.payload ?? {}),
-    last_error: reason,
-    last_error_at: new Date().toISOString()
-  };
+  // Recortar mensaje de error a 900 caracteres
+  const errorMsg = (error instanceof Error ? error.message : String(error)).slice(0, 900);
 
-  const { error } = await supabase
+  const { error: updateError } = await supabase
     .from("social_jobs")
     .update({
       status: nextStatus,
       attempts,
-      payload,
+      last_error: errorMsg,
+      last_error_at: new Date().toISOString(),
+      last_trace_id: trace_id,
       locked_at: null,
       locked_by: null
     })
     .eq("id", job.id)
     .eq("locked_by", WORKER_ID);
 
-  if (error) throw error;
+  if (updateError) throw updateError;
 
+  // Si va a reintento, aplicar backoff
   if (nextStatus === "queued") {
     await sleep(backoffMs(attempts));
   }
@@ -81,26 +112,43 @@ export async function runLoop() {
         continue;
       }
 
+      // ✅ Generar trace_id para toda la ejecución
+      const trace_id = randomUUID();
+
       console.log(
-        `[${WORKER_ID}] processing job ${job.job_type} activity_id=${job.activity_id ?? "null"}`
+        `[${WORKER_ID}] processing job ${job.job_type} activity_id=${job.activity_id ?? "null"} trace_id=${trace_id}`
       );
 
-      if (job.job_type === "generate_assets") {
-        const res = await generate_assets(job);
-        if (!res.ok) {
-        console.log(`[${WORKER_ID}] failed generate_assets for job ${job.id}`);
-        await markFailed(job, "generate_assets_failed");
-        continue;
-      }
-        // job_type desconocido: lo fallamos (o lo dejamos queued)
-        await markFailed(job, `unknown_job_type:${job.job_type}`);
-        continue;
-      }
+      try {
+        // ✅ Marcar como "running" antes de procesar
+        await markRunning(job, trace_id);
 
-      await markDone(job.id);
-      console.log(`[${WORKER_ID}] done job ${job.job_type} id=${job.id}`);
+        // Procesar según el job_type
+        if (job.job_type === "generate_assets") {
+          const res = await generate_assets(job);
+
+          if (!res.ok) {
+            console.error(`[${WORKER_ID}] generate_assets returned not ok for job ${job.id}`);
+            await markFailed(job, "generate_assets_failed", trace_id);
+            continue;
+          }
+
+          // ✅ Éxito: marcar como done
+          await markDone(job.id, trace_id);
+          console.log(`[${WORKER_ID}] ✅ done job ${job.job_type} id=${job.id} trace_id=${trace_id}`);
+        } else {
+          // job_type desconocido: marcarlo como failed
+          console.error(`[${WORKER_ID}] unknown job_type: ${job.job_type}`);
+          await markFailed(job, `unknown_job_type:${job.job_type}`, trace_id);
+        }
+      } catch (err: any) {
+        // ✅ Error durante procesamiento: marcar como failed
+        console.error(`[${WORKER_ID}] job processing error:`, err?.message ?? err);
+        await markFailed(job, err, trace_id);
+      }
     } catch (err: any) {
-      console.log(`[${WORKER_ID}] loop error:`, err?.message ?? err);
+      // Error en el loop (claim, etc)
+      console.error(`[${WORKER_ID}] loop error:`, err?.message ?? err);
       await sleep(SLEEP_ERROR_MS);
     }
   }
