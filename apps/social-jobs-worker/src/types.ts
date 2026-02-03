@@ -3,8 +3,7 @@ export type SocialJobStatus = "queued" | "running" | "done" | "failed";
 export type SocialJobType = "generate_assets";
 
 export type SocialJobRow = {
-  id: string;
-  org_id: string;
+    org_id: string;
   lead_id: string;
   activity_id: string;
   job_type: SocialJobType;
