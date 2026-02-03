@@ -1,7 +1,6 @@
 import { supabase } from "./supabase.js";
 import type { SocialJobRow } from "./types.js";
-import { handleGenerateAssets } from "./handlers/generate_assets.js";
-
+import { generate_assets } from "./handlers/generate_assets.js";
 const WORKER_ID =
   process.env.SOCIAL_WORKER_ID || `social-jobs-worker-${Math.random().toString(16).slice(2, 8)}`;
 
@@ -87,7 +86,7 @@ export async function runLoop() {
       );
 
       if (job.job_type === "generate_assets") {
-        const res = await handleGenerateAssets(job);
+        const res = await generate_assets(job);
         if (!res.ok) {
           console.log(`[${WORKER_ID}] failed generate_assets: ${res.reason}`);
           await markFailed(job, String(res.reason));
