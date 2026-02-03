@@ -199,15 +199,30 @@ Contexto:
       ],
     };
   } else {
+  try {
     if (!apiKey) throw new Error("Missing env OPENAI_API_KEY");
+
     result = await callOpenAI({
       model,
       apiKey,
       prompt: basePrompt,
       traceId: trace_id,
     });
-  }
 
+  } catch (err: any) {
+    console.error("[AI ERROR]", err?.message ?? err);
+
+    // 🔒 FALLBACK SEGURO (nunca rompe el worker)
+    result = {
+      title: `Draft ${vertical_key}`,
+      hook: "Contenido pendiente de generación",
+      caption: "No se pudo generar el contenido automáticamente. Reintentar.",
+      hashtags: [],
+      cta: "Contactar",
+      image_prompts: [],
+    };
+  }
+}
   // Inserta en social_outputs (public)
   // Columnas que vimos: title, hook, caption, hashtags (array), cta, image_prompts (jsonb array), assets (jsonb), meta (jsonb)
   const insertRow = {
