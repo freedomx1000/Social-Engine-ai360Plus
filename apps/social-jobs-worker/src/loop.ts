@@ -3,166 +3,106 @@ import type { SocialJobRow } from "./types.js";
 import { handleGenerateAssets } from "./handlers/generate_assets.js";
 
 const WORKER_ID =
-  process.env.WORKER_ID || `social-jobs-worker-${Math.random().toString(16).slice(2, 8)}`;
+  process.env.SOCIAL_WORKER_ID || `social-jobs-worker-${Math.random().toString(16).slice(2, 8)}`;
 
 const SLEEP_IDLE_MS = Number(process.env.SOCIAL_SLEEP_IDLE_MS ?? 1500);
-const SLEEP_ERROR_MS = Number(process.env.SOCIAL_SLEEP_ERROR_MS ?? 1200);
+const SLEEP_ERROR_MS = Number(process.env.SOCIAL_SLEEP_ERROR_MS ?? 900);
+const BACKOFF_BASE_MS = Number(process.env.SOCIAL_BACKOFF_BASE_MS ?? 2500);
+const STUCK_AFTER_MS = Number(process.env.SOCIAL_STUCK_AFTER_MS ?? 600000);
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function backoffMs(attempts: number) {
+  // 0->2.5s, 1->5s, 2->7.5s ... cap 30s
+  return Math.min(30000, Math.max(1, attempts + 1) * BACKOFF_BASE_MS);
 }
 
-function log(...args: any[]) {
-  console.log(new Date().toISOString(), `[${WORKER_ID}]`, ...args);
-}
-
-/**
- * Claim (lock) atomically-ish:
- * - we select one queued job
- * - then update it with locked_by/locked_at + status=running
- * - and re-select to verify we got it
- *
- * NOTE: For true atomic claim, we'd use a SQL function (recommended later),
- * but this is stable enough to start with given low concurrency.
- */
-async function claimOneJob(): Promise<SocialJobRow | null> {
-  const { data: rows, error } = await supabase
-    .from("social_jobs")
-    .select("*")
-    .eq("status", "queued")
-    .order("created_at", { ascending: true })
-    .limit(1);
+async function claimNext(): Promise<SocialJobRow | null> {
+  const { data, error } = await supabase.rpc("social_jobs_claim_next", {
+    p_worker: WORKER_ID,
+    p_stuck_after_ms: STUCK_AFTER_MS
+  });
 
   if (error) throw error;
-  const job = rows?.[0] as SocialJobRow | undefined;
-  if (!job) return null;
 
-  const now = new Date().toISOString();
-
-  // Try claim
-  const { error: updErr } = await supabase
-    .from("social_jobs")
-    .update({
-      status: "running",
-      locked_at: now,
-      locked_by: WORKER_ID,
-      updated_at: now,
-    })
-    .eq("activity_id", job.activity_id)
-    .eq("job_type", job.job_type)
-    .eq("status", "queued"); // only claim if still queued
-
-  if (updErr) throw updErr;
-
-  // Verify we got it
-  const { data: verify, error: vErr } = await supabase
-    .from("social_jobs")
-    .select("*")
-    .eq("activity_id", job.activity_id)
-    .eq("job_type", job.job_type)
-    .limit(1);
-
-  if (vErr) throw vErr;
-
-  const claimed = verify?.[0] as SocialJobRow | undefined;
-  if (!claimed) return null;
-  if (claimed.locked_by !== WORKER_ID) return null;
-  if (claimed.status !== "running") return null;
-
-  return claimed;
+  const rows = (data ?? []) as SocialJobRow[];
+  return rows.length ? rows[0] : null;
 }
 
-async function markFailed(job: SocialJobRow, err: any) {
-  const now = new Date().toISOString();
+async function markDone(jobId: string) {
+  const { error } = await supabase
+    .from("social_jobs")
+    .update({ status: "done", locked_at: null, locked_by: null })
+    .eq("id", jobId)
+    .eq("locked_by", WORKER_ID);
+
+  if (error) throw error;
+}
+
+async function markFailed(job: SocialJobRow, reason: string) {
+  const attempts = Number(job.attempts ?? 0) + 1;
+  const maxAttempts = Number(job.max_attempts ?? 5);
+
+  const nextStatus = attempts >= maxAttempts ? "failed" : "queued";
+
   const payload = {
     ...(job.payload ?? {}),
-    error: {
-      message: String(err?.message ?? err),
-      stack: String(err?.stack ?? ""),
-      ts: now,
-    },
+    last_error: reason,
+    last_error_at: new Date().toISOString()
   };
 
   const { error } = await supabase
     .from("social_jobs")
     .update({
-      status: "failed",
-      attempts: (job.attempts ?? 0) + 1,
+      status: nextStatus,
+      attempts,
       payload,
-      updated_at: now,
-    })
-    .eq("activity_id", job.activity_id)
-    .eq("job_type", job.job_type);
-
-  if (error) throw error;
-}
-
-async function requeue(job: SocialJobRow, err: any) {
-  const now = new Date().toISOString();
-  const nextAttempts = (job.attempts ?? 0) + 1;
-
-  const payload = {
-    ...(job.payload ?? {}),
-    last_error: {
-      message: String(err?.message ?? err),
-      ts: now,
-    },
-  };
-
-  const { error } = await supabase
-    .from("social_jobs")
-    .update({
-      status: "queued",
-      attempts: nextAttempts,
       locked_at: null,
-      locked_by: null,
-      payload,
-      updated_at: now,
+      locked_by: null
     })
-    .eq("activity_id", job.activity_id)
-    .eq("job_type", job.job_type);
+    .eq("id", job.id)
+    .eq("locked_by", WORKER_ID);
 
   if (error) throw error;
-}
 
-async function processJob(job: SocialJobRow) {
-  log("processing job", job.job_type, "activity_id=", job.activity_id);
-
-  if (job.job_type === "generate_assets") {
-    await handleGenerateAssets(job);
-    log("done job", job.job_type, "activity_id=", job.activity_id);
-    return;
+  if (nextStatus === "queued") {
+    await sleep(backoffMs(attempts));
   }
-
-  throw new Error(`Unknown job_type: ${job.job_type}`);
 }
 
 export async function runLoop() {
-  log("booting...");
+  console.log(`[${WORKER_ID}] booting...`);
+
   while (true) {
     try {
-      const job = await claimOneJob();
+      const job = await claimNext();
+
       if (!job) {
         await sleep(SLEEP_IDLE_MS);
         continue;
       }
 
-      try {
-        await processJob(job);
-      } catch (err: any) {
-        const attempts = job.attempts ?? 0;
-        const maxAttempts = job.max_attempts ?? 5;
+      console.log(
+        `[${WORKER_ID}] processing job ${job.job_type} activity_id=${job.activity_id ?? "null"}`
+      );
 
-        if (attempts + 1 >= maxAttempts) {
-          log("job failed (max attempts)", job.activity_id, err?.message ?? err);
-          await markFailed(job, err);
-        } else {
-          log("job error, requeue", job.activity_id, err?.message ?? err);
-          await requeue(job, err);
+      if (job.job_type === "generate_assets") {
+        const res = await handleGenerateAssets(job);
+        if (!res.ok) {
+          console.log(`[${WORKER_ID}] failed generate_assets: ${res.reason}`);
+          await markFailed(job, String(res.reason));
+          continue;
         }
+      } else {
+        // job_type desconocido: lo fallamos (o lo dejamos queued)
+        await markFailed(job, `unknown_job_type:${job.job_type}`);
+        continue;
       }
+
+      await markDone(job.id);
+      console.log(`[${WORKER_ID}] done job ${job.job_type} id=${job.id}`);
     } catch (err: any) {
-      log("loop error", err?.message ?? err);
+      console.log(`[${WORKER_ID}] loop error:`, err?.message ?? err);
       await sleep(SLEEP_ERROR_MS);
     }
   }
