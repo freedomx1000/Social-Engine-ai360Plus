@@ -1,4 +1,6 @@
 import { runLoop } from "./loop.js";
 
-console.log("[social-jobs-worker] booting...");
-await runLoop();
+runLoop().catch((e) => {
+  console.error("Fatal:", e);
+  process.exit(1);
+});
