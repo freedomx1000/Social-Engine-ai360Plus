@@ -186,7 +186,7 @@ INSTRUCCIONES:
       { role: "user", content: user },
     ],
     // Responses API: Structured Outputs va en text.format (NO response_format)
-    text: { format: { type: "json_schema", strict: true, schema } },
+    text: { format: { type: "json_schema", json_schema: schema } },
     temperature: 0.2,
     max_output_tokens: 900,
   });
