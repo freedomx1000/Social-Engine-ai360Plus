@@ -97,10 +97,10 @@ async function callOpenAIJsonStrict(args: {
       model: args.model,
       temperature: 0.8,
       response_format: { type: "json_schema", json_schema: schema },
-                               messages: [ro{le: "system",
-          content:
-            "You are an expert social media copywriter. Output MUST strictly match the JSON schema. No extra keys, no markdown."
-        },
+          messages: [          content:
+                                 {
+                                   role: "system",
+              content: "You are an expert social media copywriter. Output MUST strictly match the JSON schema. No extra keys, no markdown."        },
         {
           role: "user",
           content: args.prompt
