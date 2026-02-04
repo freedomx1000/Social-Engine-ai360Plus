@@ -1,6 +1,6 @@
 /* apps/social-jobs-worker/src/handlers/generate_assets.ts */
 
-import { supabase } from "../supabase";
+import { supabase } from "../supabase.js";
 
 /**
  * Expected LLM JSON shape
