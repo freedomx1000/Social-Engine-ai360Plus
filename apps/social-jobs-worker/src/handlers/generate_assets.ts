@@ -88,8 +88,7 @@ async function callOpenAIJsonStrict(args: {
     }
   };
 
-  const res = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {    method: "POST",
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json"
@@ -97,10 +96,8 @@ async function callOpenAIJsonStrict(args: {
     body: JSON.stringify({
       model: args.model,
       temperature: 0.8,
-      text: { format: { type: "json_schema", json_schema: schema } },
-      input: [
-        {
-          role: "system",
+      response_format: { type: "json_schema", json_schema: schema },
+                               messages: [role: "system",
           content:
             "You are an expert social media copywriter. Output MUST strictly match the JSON schema. No extra keys, no markdown."
         },
@@ -119,34 +116,13 @@ async function callOpenAIJsonStrict(args: {
 
   const json = (await res.json()) as any;
 
-  let rawText = "";
-
-  if (typeof json.output_text === "string" && json.output_text.trim()) {
-    rawText = json.output_text.trim();
-  } else if (Array.isArray(json.output)) {
-    for (const o of json.output) {
-      const content = o?.content;
-      if (Array.isArray(content)) {
-        for (const c of content) {
-          if (c?.type === "output_text" && typeof c?.text === "string") {
-            rawText = c.text.trim();
-            break;
-          }
-        }
-      }
-      if (rawText) break;
-    }
+  // Para Chat Completions, el JSON viene en choices[0].message.content
+  const content = json?.choices?.[0]?.message?.content;
+  if (!content || typeof content !== "string") {
+    throw new Error(`OpenAI response missing message.content. trace=${args.traceId}`);
   }
 
-  if (!rawText) {
-    if (json?.output?.[0]?.content?.[0]?.json) {
-      return json.output[0].content[0].json as GenerateAssetsResult;
-    }
-    throw new Error(`OpenAI: could not locate output_text. trace=${args.traceId}`);
-  }
-
-  const parsed = JSON.parse(rawText) as GenerateAssetsResult;
-
+    const parsed = JSON.parse(content) as GenerateAssetsResult;
   if (
     !parsed ||
     typeof parsed.title !== "string" ||
