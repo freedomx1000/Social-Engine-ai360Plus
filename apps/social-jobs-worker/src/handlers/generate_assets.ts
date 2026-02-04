@@ -1,5 +1,6 @@
 /* apps/social-jobs-worker/src/handlers/generate_assets.ts */
 
+import crypto from "node:crypto";
 import { supabase } from "../supabase.js";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -51,7 +52,10 @@ function pickString(v: any, fallback: string) {
 
 function pickArrayOfStrings(v: any): string[] {
   if (!Array.isArray(v)) return [];
-  return v.filter((x) => typeof x === "string").map((x) => x.trim()).filter(Boolean);
+  return v
+    .filter((x) => typeof x === "string")
+    .map((x) => x.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -92,7 +96,6 @@ async function callOpenAIJsonStrict(args: {
     },
     body: JSON.stringify({
       model: args.model,
-      // Puedes ajustar temperatura si quieres más/menos creatividad
       temperature: 0.8,
       response_format: { type: "json_schema", json_schema: schema },
       input: [
@@ -116,8 +119,6 @@ async function callOpenAIJsonStrict(args: {
 
   const json = (await res.json()) as any;
 
-  // Responses API: el JSON suele venir en output_text o output[].content[].
-  // Buscamos algo parseable.
   let rawText = "";
 
   if (typeof json.output_text === "string" && json.output_text.trim()) {
@@ -138,7 +139,6 @@ async function callOpenAIJsonStrict(args: {
   }
 
   if (!rawText) {
-    // a veces ya viene como objeto (raro). Intentamos:
     if (json?.output?.[0]?.content?.[0]?.json) {
       return json.output[0].content[0].json as GenerateAssetsResult;
     }
@@ -147,7 +147,6 @@ async function callOpenAIJsonStrict(args: {
 
   const parsed = JSON.parse(rawText) as GenerateAssetsResult;
 
-  // Validación defensiva mínima
   if (
     !parsed ||
     typeof parsed.title !== "string" ||
@@ -157,13 +156,14 @@ async function callOpenAIJsonStrict(args: {
     typeof parsed.cta !== "string" ||
     !Array.isArray(parsed.image_prompts)
   ) {
-    throw new Error(`OpenAI returned invalid shape. trace=${args.traceId} raw=${rawText.slice(0, 300)}`);
+    throw new Error(
+      `OpenAI returned invalid shape. trace=${args.traceId} raw=${rawText.slice(0, 300)}`
+    );
   }
 
   const dt = nowMs() - t0;
   console.log(`[openai] trace=${args.traceId} model=${args.model} ms=${dt}`);
 
-  // Limpieza extra
   return {
     title: pickString(parsed.title, "Untitled"),
     hook: pickString(parsed.hook, ""),
@@ -177,10 +177,12 @@ async function callOpenAIJsonStrict(args: {
 /**
  * Lee Vertical Profile (si existe). Si no existe, usa "general" si está.
  */
-async function fetchVerticalProfile(vertical_key: string, traceId: string): Promise<SocialVerticalProfile | null> {
+async function fetchVerticalProfile(
+  vertical_key: string,
+  traceId: string
+): Promise<SocialVerticalProfile | null> {
   const t0 = nowMs();
 
-  // 1) intentamos vertical_key pedido
   const { data: p1, error: e1 } = await supabase
     .from("social_vertical_profiles")
     .select(
@@ -191,15 +193,18 @@ async function fetchVerticalProfile(vertical_key: string, traceId: string): Prom
     .maybeSingle();
 
   if (e1) {
-    console.warn(`[vertical_profile] trace=${traceId} fetch error vertical=${vertical_key} err=${e1.message}`);
+    console.warn(
+      `[vertical_profile] trace=${traceId} fetch error vertical=${vertical_key} err=${e1.message}`
+    );
   }
 
   if (p1) {
-    console.log(`[vertical_profile] trace=${traceId} vertical=${vertical_key} hit=1 ms=${nowMs() - t0}`);
+    console.log(
+      `[vertical_profile] trace=${traceId} vertical=${vertical_key} hit=1 ms=${nowMs() - t0}`
+    );
     return p1 as SocialVerticalProfile;
   }
 
-  // 2) fallback a general
   const { data: p2, error: e2 } = await supabase
     .from("social_vertical_profiles")
     .select(
@@ -213,7 +218,9 @@ async function fetchVerticalProfile(vertical_key: string, traceId: string): Prom
     console.warn(`[vertical_profile] trace=${traceId} fallback general err=${e2.message}`);
   }
 
-  console.log(`[vertical_profile] trace=${traceId} vertical=${vertical_key} hit=${p2 ? 1 : 0} ms=${nowMs() - t0}`);
+  console.log(
+    `[vertical_profile] trace=${traceId} vertical=${vertical_key} hit=${p2 ? 1 : 0} ms=${nowMs() - t0}`
+  );
   return (p2 as SocialVerticalProfile) || null;
 }
 
@@ -279,28 +286,25 @@ GUIDANCE:
 
 /**
  * Handler principal
- * Inserta en public.social_outputs:
- * - status='draft'
- * - channel='multi'
- * - vertical_key desde payload/meta
- * - image_prompts jsonb array
- * - assets = []
- * - meta incluye { model, trace_id, activity_id }
  */
 export async function generate_assets(job: any) {
   const started = nowMs();
 
-  const activity_id = job?.activity_id || job?.activityId || job?.payload?.activity_id || job?.payload?.activityId;
-  const trace_id = job?.trace_id || job?.traceId || job?.payload?.trace_id || job?.payload?.traceId || crypto.randomUUID();
+  const activity_id =
+    job?.activity_id || job?.activityId || job?.payload?.activity_id || job?.payload?.activityId;
+  const trace_id =
+    job?.trace_id ||
+    job?.traceId ||
+    job?.payload?.trace_id ||
+    job?.payload?.traceId ||
+    crypto.randomUUID();
 
   const payload = job?.payload ?? {};
   const meta = job?.meta ?? payload?.meta ?? {};
 
-  // channel + vertical_key (prioridad: payload.meta, luego payload, luego default)
   const channel = pickString(meta?.channel ?? payload?.channel, "multi");
   const vertical_key = pickString(meta?.vertical_key ?? payload?.vertical_key, "general");
 
-  // context base (si tu job ya trae cosas extra, se vuelcan)
   const lead_name = pickString(payload?.lead_name ?? payload?.leadName ?? meta?.lead_name, "unknown");
   const topic = pickString(payload?.topic ?? meta?.topic, "none");
   const offer = pickString(payload?.offer ?? meta?.offer, "none");
@@ -320,31 +324,27 @@ payload_json: ${safeJson(payload)}
 
   const model = pickString(payload?.model ?? meta?.model, DEFAULT_MODEL);
 
-  // 1) Cargar vertical profile
   const vp0 = nowMs();
   const profile = await fetchVerticalProfile(vertical_key, trace_id);
   const vpLatency = nowMs() - vp0;
 
-  // 2) Llamar OpenAI con JSON estricto
   const llm0 = nowMs();
   const prompt = buildPrompt({ traceId: trace_id, vertical_key, context, profile });
   const result = await callOpenAIJsonStrict({ model, traceId: trace_id, prompt });
   const llmLatency = nowMs() - llm0;
 
-  // 3) Insert/Upsert en social_outputs (idempotente)
   const db0 = nowMs();
 
-  // Nota: si aplicas el SQL de idempotencia que te dejo más abajo,
-  // tendrás columna activity_id generada desde meta, y unique(activity_id, channel, vertical_key).
-  // Aquí ponemos meta.activity_id SIEMPRE.
   const insertRow: any = {
-    // (si tu tabla tiene org_id / lead_id, inclúyelos si existen; si no, no pasa nada)
     org_id: payload?.org_id ?? payload?.orgId ?? meta?.org_id ?? meta?.orgId ?? null,
     lead_id: payload?.lead_id ?? payload?.leadId ?? meta?.lead_id ?? meta?.leadId ?? null,
 
     status: "draft",
     channel,
     vertical_key,
+
+    // ✅ FIX: columna real para idempotencia
+    activity_id: activity_id ?? null,
 
     title: result.title,
     hook: result.hook,
@@ -363,7 +363,6 @@ payload_json: ${safeJson(payload)}
     }
   };
 
-  // UPSERT: requiere unique(activity_id, channel, vertical_key) (te lo doy en SQL)
   const { data: out, error: outErr } = await supabase
     .from("social_outputs")
     .upsert(insertRow, {
@@ -383,7 +382,6 @@ payload_json: ${safeJson(payload)}
 
   const total = nowMs() - started;
 
-  // Observabilidad PRO (una línea fácil de grep)
   console.log(
     `[generate_assets] done trace=${trace_id} activity_id=${activity_id} output_id=${out?.id} model=${model} ` +
       `vp_ms=${vpLatency} llm_ms=${llmLatency} db_ms=${dbLatency} total_ms=${total}`
