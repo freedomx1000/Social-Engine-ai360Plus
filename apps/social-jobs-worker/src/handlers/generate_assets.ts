@@ -176,21 +176,21 @@ const schema = {
       additionalProperties: false,
     },
     image_prompts: {
-  type: "array",
-  items: {
-    type: "object",
-    additionalProperties: false,
-    required: ["prompt", "style"],
-    properties: {
-      prompt: { type: "string" },
-      style: { type: "string" },
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["prompt", "style"],
+        properties: {
+          prompt: { type: "string" },
+          style: { type: "string" },
+        },
+      },
+      minItems: 1,
     },
-  },
-  minItems: 1,
-},
     assets: {
       type: "object",
-      additionalProperties: true, // si quieres permitir más campos aquí
+      additionalProperties: false,
       properties: {
         thumbnail_url: { type: "string" },
         video_url: { type: "string" },
@@ -198,7 +198,6 @@ const schema = {
     },
   },
 };
-
 
   // 5) OpenAI call
   const out = await openaiResponsesJSON({
