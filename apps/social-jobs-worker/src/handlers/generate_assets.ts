@@ -161,20 +161,44 @@ activity_payload_json: ${safeJson(actPayload)}
 `.trim();
 
   // 4) Schema expected by your DB columns (title, hook, caption, hashtags, cta, image_prompts, assets)
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    required: ["title", "hook", "caption", "hashtags", "cta", "image_prompts"],
-    properties: {
-      title: { type: "string" },
-      hook: { type: "string" },
-      caption: { type: "string" },
-      cta: { type: "string" },
-      hashtags: { type: "array", items: { type: "string" } },
-      image_prompts: { type: "object" }, // keep flexible
-      assets: { type: "object" },        // optional / flexible
+const schema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "hook", "caption", "hashtags", "cta", "image_prompts"],
+  properties: {
+    title: { type: "string" },
+    hook: { type: "string" },
+    caption: { type: "string" },
+    cta: { type: "string" },
+    hashtags: {
+      type: "array",
+      items: { type: "string" },
+      additionalProperties: false,
     },
-  };
+    image_prompts: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["prompt"],
+        properties: {
+          prompt: { type: "string" },
+          style: { type: "string" },
+        },
+      },
+      minItems: 1,
+    },
+    assets: {
+      type: "object",
+      additionalProperties: true, // si quieres permitir más campos aquí
+      properties: {
+        thumbnail_url: { type: "string" },
+        video_url: { type: "string" },
+      },
+    },
+  },
+};
+
 
   // 5) OpenAI call
   const out = await openaiResponsesJSON({
