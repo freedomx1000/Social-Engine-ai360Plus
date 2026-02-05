@@ -161,10 +161,18 @@ activity_payload_json: ${safeJson(actPayload)}
 `.trim();
 
  // 4) Schema expected by your DB columns (title, hook, caption, hashtags, cta, image_prompts, assets)
+// 4) Schema expected by your DB columns (title, hook, caption, hashtags, cta, image_prompts)
 const schema = {
   type: "object",
   additionalProperties: false,
-  required: ["title", "hook", "caption", "hashtags", "cta", "image_prompts"],
+  required: [
+    "title",
+    "hook",
+    "caption",
+    "hashtags",
+    "cta",
+    "image_prompts",
+  ],
   properties: {
     title: { type: "string" },
     hook: { type: "string" },
@@ -187,15 +195,6 @@ const schema = {
         },
       },
       minItems: 1,
-    },
-    assets: {
-      type: "object",
-      additionalProperties: false,
-      required: ["thumbnail_url", "video_url"],
-      properties: {
-        thumbnail_url: { type: "string" },
-        video_url: { type: "string" },
-      },
     },
   },
 };
