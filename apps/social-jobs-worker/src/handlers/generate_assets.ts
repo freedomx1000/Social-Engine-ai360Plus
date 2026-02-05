@@ -369,3 +369,29 @@ payload_json: ${safeJson(payload)}
     trace_id
   };
 }
+
+const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+  },
+  body: JSON.stringify({
+    model: args.model,
+    temperature: 0.8,
+    response_format: {
+      type: "json_schema",
+      json_schema: schema,
+    },
+    messages: [
+      {
+        role: "system",
+        content: "You are an expert social media copywriter.",
+      },
+      {
+        role: "user",
+        content: prompt,
+      },
+    ],
+  }),
+});
