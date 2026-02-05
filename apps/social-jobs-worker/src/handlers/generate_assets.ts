@@ -189,15 +189,15 @@ const schema = {
       minItems: 1,
     },
     assets: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        thumbnail_url: { type: "string" },
-        video_url: { type: "string" },
-      },
-    },
+  type: "object",
+  additionalProperties: false,
+  required: ["thumbnail_url", "video_url"],
+  properties: {
+    thumbnail_url: { type: "string" },
+    video_url: { type: "string" },
   },
-};
+},
+
 
   // 5) OpenAI call
   const out = await openaiResponsesJSON({
