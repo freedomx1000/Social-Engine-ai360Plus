@@ -176,18 +176,18 @@ const schema = {
       additionalProperties: false,
     },
     image_prompts: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["prompt"],
-        properties: {
-          prompt: { type: "string" },
-          style: { type: "string" },
-        },
-      },
-      minItems: 1,
+  type: "array",
+  items: {
+    type: "object",
+    additionalProperties: false,
+    required: ["prompt", "style"],
+    properties: {
+      prompt: { type: "string" },
+      style: { type: "string" },
     },
+  },
+  minItems: 1,
+},
     assets: {
       type: "object",
       additionalProperties: true, // si quieres permitir más campos aquí
