@@ -3,7 +3,9 @@
 // (based on your Generate_Assets.txt)
 // ---------------------------------------------------------------
 
-import { supabaseAdmin } from "../supabase.js";
+import { getSupabaseAdmin } from "../supabaseAdmin.js";
+
+const supabaseAdmin = getSupabaseAdmin();
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini"; // usa el que tengas disponible
