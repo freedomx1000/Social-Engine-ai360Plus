@@ -1,395 +1,228 @@
-/* apps/social-jobs-worker/src/handlers/generate_assets.ts */
+// src/handlers/generate_assets.ts
+// Generate Assets worker — Supabase Admin self-contained + OpenAI Responses API (text.format)
+// --------------------------------------------------------------------------------------
 
-import { supabase } from "../supabase.js";
+import { createClient } from "@supabase/supabase-js";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-// Cambia si quieres otro modelo
-const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
+const OPENAI_BASE = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
-/**
- * Expected LLM JSON shape (strict)
- */
-type GenerateAssetsResult = {
-  title: string;
-  hook: string;
-  caption: string;
-  hashtags: string[];
-  cta: string;
-  image_prompts: string[];
-};
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+}
+if (!OPENAI_API_KEY) {
+  throw new Error("Missing OPENAI_API_KEY");
+}
 
-type SocialVerticalProfile = {
-  vertical_key: string;
-  name: string | null;
-  locale: string | null;
-  tone: string | null;
-  audience: string | null;
-  positioning: string | null;
-  prompt_preamble: string | null;
-  image_style: string | null;
-  hashtag_seed: string[] | null;
-  style_rules: any | null; // jsonb
-  is_active: boolean;
-};
-
-function nowMs() {
-  return Date.now();
+function supabaseAdmin() {
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
 }
 
 function safeJson(v: any) {
   try {
     return JSON.stringify(v);
   } catch {
-    return String(v);
+    return "{}";
   }
 }
 
-function pickString(v: any, fallback: string) {
-  return typeof v === "string" && v.trim() ? v.trim() : fallback;
+function pickString(...vals: Array<any>) {
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
 }
 
-function pickArrayOfStrings(v: any): string[] {
-  if (!Array.isArray(v)) return [];
-  return v.filter((x) => typeof x === "string").map((x) => x.trim()).filter(Boolean);
-}
+// ---- OpenAI Responses API (JSON Schema via text.format) -------------------------------
 
-/**
- * OpenAI Responses API call forcing strict JSON schema output.
- */
-async function callOpenAIJsonStrict(args: {
-  model: string;
-  traceId: string;
-  prompt: string;
-}): Promise<GenerateAssetsResult> {
-  if (!OPENAI_API_KEY) throw new Error("Missing env OPENAI_API_KEY");
+async function openaiResponsesJSON(args: {
+  system: string;
+  user: string;
+  schema: any; // JSON Schema (the "schema" object)
+  temperature?: number;
+}) {
+  const { system, user, schema, temperature = 0.2 } = args;
 
-  const t0 = nowMs();
-
-    const schema = {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      title: { type: "string" },
-      hook: { type: "string" },
-      caption: { type: "string" },
-      hashtags: { type: "array", items: { type: "string" } },
-      cta: { type: "string" },
-      image_prompts: { type: "array", items: { type: "string" } }
+  // IMPORTANT: Responses API requires text.format.name (your current error)
+  const body = {
+    model: OPENAI_MODEL,
+    temperature,
+    text: {
+      format: {
+        type: "json_schema",
+        name: "social_assets_v1",
+        schema, // <-- pure JSON schema here
+      },
     },
-    required: ["title", "hook", "caption", "hashtags", "cta", "image_prompts"]
+    input: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
   };
 
-
-  const res = await fetch("https://api.openai.com/v1/responses", {
+  const resp = await fetch(`${OPENAI_BASE}/responses`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model: args.model,
-      // Puedes ajustar temperatura si quieres más/menos creatividad
-      temperature: 0.8,      // ✅ Responses API: structured outputs via text.format
-      text: { format: { type: "json_schema", name: "social_assets_v1", strict: true, schema } },
-      input: [
-        {
-          role: "system",
-          content:
-            "You are an expert social media copywriter. Output MUST strictly match the JSON schema. No extra keys, no markdown."
-        },
-        {
-          role: "user",
-          content: args.prompt
-        }
-      ]
-      })
-    });
+    body: JSON.stringify(body),
+  });
 
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`OpenAI error ${res.status}: ${txt.slice(0, 500)}`);
+  const data = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    const err = data?.error ? safeJson(data.error) : safeJson(data);
+    throw new Error(`OpenAI error ${resp.status}: ${err}`);
   }
 
-  const json = (await res.json()) as any;
+  const textOut =
+    data?.output_text ??
+    data?.output?.[0]?.content?.find?.((c: any) => c?.type === "output_text")?.text ??
+    data?.output?.[0]?.content?.[0]?.text;
 
-  // Responses API: el JSON suele venir en output_text o output[].content[].
-  // Buscamos algo parseable.
-  let rawText = "";
+  if (!textOut) throw new Error(`OpenAI returned no text. payload=${safeJson(data)}`);
 
-  if (typeof json.output_text === "string" && json.output_text.trim()) {
-    rawText = json.output_text.trim();
-  } else if (Array.isArray(json.output)) {
-    for (const o of json.output) {
-      const content = o?.content;
-      if (Array.isArray(content)) {
-        for (const c of content) {
-          if (c?.type === "output_text" && typeof c?.text === "string") {
-            rawText = c.text.trim();
-            break;
-          }
-        }
-      }
-      if (rawText) break;
-    }
+  try {
+    return JSON.parse(textOut);
+  } catch {
+    throw new Error(`OpenAI returned non-JSON output. text=${String(textOut).slice(0, 800)}`);
   }
-
-  if (!rawText) {
-    // a veces ya viene como objeto (raro). Intentamos:
-    if (json?.output?.[0]?.content?.[0]?.json) {
-      return json.output[0].content[0].json as GenerateAssetsResult;
-    }
-    throw new Error(`OpenAI: could not locate output_text. trace=${args.traceId}`);
-  }
-
-  const parsed = JSON.parse(rawText) as GenerateAssetsResult;
-
-  // Validación defensiva mínima
-  if (
-    !parsed ||
-    typeof parsed.title !== "string" ||
-    typeof parsed.hook !== "string" ||
-    typeof parsed.caption !== "string" ||
-    !Array.isArray(parsed.hashtags) ||
-    typeof parsed.cta !== "string" ||
-    !Array.isArray(parsed.image_prompts)
-  ) {
-    throw new Error(`OpenAI returned invalid shape. trace=${args.traceId} raw=${rawText.slice(0, 300)}`);
-  }
-
-  const dt = nowMs() - t0;
-  console.log(`[openai] trace=${args.traceId} model=${args.model} ms=${dt}`);
-
-  // Limpieza extra
-  return {
-    title: pickString(parsed.title, "Untitled"),
-    hook: pickString(parsed.hook, ""),
-    caption: pickString(parsed.caption, ""),
-    hashtags: pickArrayOfStrings(parsed.hashtags).slice(0, 18),
-    cta: pickString(parsed.cta, ""),
-    image_prompts: pickArrayOfStrings(parsed.image_prompts).slice(0, 6)
-  };
 }
 
-/**
- * Lee Vertical Profile (si existe). Si no existe, usa "general" si está.
- */
-async function fetchVerticalProfile(vertical_key: string, traceId: string): Promise<SocialVerticalProfile | null> {
-  const t0 = nowMs();
+// ---- Main exported handler ------------------------------------------------------------
+// The worker loop imports { generate_assets } from "./handlers/generate_assets.js"
+// So we MUST export generate_assets.
 
-  // 1) intentamos vertical_key pedido
-  const { data: p1, error: e1 } = await supabase
-    .from("social_vertical_profiles")
-    .select(
-      "vertical_key,name,locale,tone,audience,positioning,prompt_preamble,image_style,hashtag_seed,style_rules,is_active"
-    )
-    .eq("vertical_key", vertical_key)
-    .eq("is_active", true)
-    .maybeSingle();
-
-  if (e1) {
-    console.warn(`[vertical_profile] trace=${traceId} fetch error vertical=${vertical_key} err=${e1.message}`);
-  }
-
-  if (p1) {
-    console.log(`[vertical_profile] trace=${traceId} vertical=${vertical_key} hit=1 ms=${nowMs() - t0}`);
-    return p1 as SocialVerticalProfile;
-  }
-
-  // 2) fallback a general
-  const { data: p2, error: e2 } = await supabase
-    .from("social_vertical_profiles")
-    .select(
-      "vertical_key,name,locale,tone,audience,positioning,prompt_preamble,image_style,hashtag_seed,style_rules,is_active"
-    )
-    .eq("vertical_key", "general")
-    .eq("is_active", true)
-    .maybeSingle();
-
-  if (e2) {
-    console.warn(`[vertical_profile] trace=${traceId} fallback general err=${e2.message}`);
-  }
-
-  console.log(`[vertical_profile] trace=${traceId} vertical=${vertical_key} hit=${p2 ? 1 : 0} ms=${nowMs() - t0}`);
-  return (p2 as SocialVerticalProfile) || null;
-}
-
-/**
- * Construye prompt final usando context + vertical profile.
- */
-function buildPrompt(args: {
-  traceId: string;
-  vertical_key: string;
-  context: string;
-  profile: SocialVerticalProfile | null;
-}): string {
-  const p = args.profile;
-
-  const profileBlock = p
-    ? `
-VERTICAL PROFILE:
-- vertical_key: ${p.vertical_key}
-- name: ${p.name ?? ""}
-- locale: ${p.locale ?? ""}
-- tone: ${p.tone ?? ""}
-- audience: ${p.audience ?? ""}
-- positioning: ${p.positioning ?? ""}
-- prompt_preamble: ${p.prompt_preamble ?? ""}
-- image_style: ${p.image_style ?? ""}
-- hashtag_seed: ${(p.hashtag_seed ?? []).join(", ")}
-- style_rules_json: ${p.style_rules ? safeJson(p.style_rules) : ""}
-`
-    : `
-VERTICAL PROFILE:
-- none (use default best-practice social style)
-`;
-
-  return `
-TASK:
-Create social media assets in Spanish, optimized for conversion.
-
-OUTPUT RULES:
-- Must output STRICT JSON matching the schema.
-- No markdown, no extra keys.
-- Keep it punchy, modern, human, no hype-buzzword salad.
-- Hashtags: 8-16 max.
-- image_prompts: 3-6 prompts. Each MUST be photorealistic, studio lighting, modern, "no text", and consistent with the brand.
-
-CONTEXT:
-trace_id: ${args.traceId}
-vertical_key: ${args.vertical_key}
-
-${profileBlock}
-
-USER INPUT / JOB CONTEXT:
-${args.context}
-
-GUIDANCE:
-- title: short, scroll-stopping (<= 60 chars)
-- hook: 1 sentence, curiosity + benefit
-- caption: 3-6 lines, clarity > poetry, include 1-2 emojis max
-- cta: clear single action (demo, audit, checklist, reply, etc.)
-- hashtags: relevant, not spammy
-- image_prompts: match vertical + brand, neutral background, studio light, no text, no logos
-`.trim();
-}
-
-/**
- * Handler principal
- * Inserta en public.social_outputs:
- * - status='draft'
- * - channel='multi'
- * - vertical_key desde payload/meta
- * - image_prompts jsonb array
- * - assets = []
- * - meta incluye { model, trace_id, activity_id }
- */
 export async function generate_assets(job: any) {
-  const started = nowMs();
+  const sb = supabaseAdmin();
 
-  const activity_id = job?.activity_id || job?.activityId || job?.payload?.activity_id || job?.payload?.activityId;
-  const trace_id = job?.trace_id || job?.traceId || job?.payload?.trace_id || job?.payload?.traceId || crypto.randomUUID();
-
+  // job fields (be tolerant)
+  const job_id = job?.id ?? job?.job_id;
+  const activity_id = job?.activity_id ?? job?.activityId;
   const payload = job?.payload ?? {};
   const meta = job?.meta ?? payload?.meta ?? {};
 
-  // channel + vertical_key (prioridad: payload.meta, luego payload, luego default)
-  const channel = pickString(meta?.channel ?? payload?.channel, "multi");
-  const vertical_key = pickString(meta?.vertical_key ?? payload?.vertical_key, "general");
+  const channel = pickString(meta?.channel, payload?.channel, "multi");
+  const vertical_key = pickString(meta?.vertical_key, payload?.vertical_key, "general");
 
-  // context base (si tu job ya trae cosas extra, se vuelcan)
-  const lead_name = pickString(payload?.lead_name ?? payload?.leadName ?? meta?.lead_name, "unknown");
-  const topic = pickString(payload?.topic ?? meta?.topic, "none");
-  const offer = pickString(payload?.offer ?? meta?.offer, "none");
-  const brief = pickString(payload?.brief ?? meta?.brief, "");
+  if (!activity_id) {
+    throw new Error("Missing activity_id on job");
+  }
 
-  const context = `
+  // 1) Load activity context
+  const { data: act, error: actErr } = await sb
+    .from("crm_lead_activity")
+    .select("id, org_id, lead_id, message, meta, payload, created_at")
+    .eq("id", activity_id)
+    .maybeSingle();
+
+  if (actErr) throw new Error(`crm_lead_activity error: ${actErr.message}`);
+  if (!act) throw new Error("crm_lead_activity not found");
+
+  const actPayload = act.payload ?? {};
+  const actMeta = act.meta ?? {};
+
+  const lead_name = pickString(actMeta?.lead_name, actPayload?.lead_name, actPayload?.leadName, "unknown");
+  const topic = pickString(actMeta?.topic, actPayload?.topic, "none");
+  const offer = pickString(actMeta?.offer, actPayload?.offer, "none");
+  const brief = pickString(actMeta?.brief, actPayload?.brief, "");
+
+  // 2) Load vertical profile (prompt_preamble)
+  const { data: vp, error: vpErr } = await sb
+    .from("social_vertical_profiles")
+    .select("vertical_key, prompt_preamble, locale, tone, audience")
+    .eq("vertical_key", vertical_key)
+    .maybeSingle();
+
+  if (vpErr) throw new Error(`social_vertical_profiles error: ${vpErr.message}`);
+
+  const prompt_preamble = pickString(vp?.prompt_preamble, "Eres un copywriter experto en social media.");
+
+  // 3) Build prompt
+  const system = `${prompt_preamble}
+Devuelve SOLO JSON válido que cumpla el schema. Nada de texto extra.`;
+
+  const userPrompt = `
 lead_name: ${lead_name}
 topic: ${topic}
 offer: ${offer}
 brief: ${brief}
-payload_json: ${safeJson(payload)}
+channel: ${channel}
+vertical_key: ${vertical_key}
+activity_message: ${pickString(act.message, "")}
+activity_meta_json: ${safeJson(actMeta)}
+activity_payload_json: ${safeJson(actPayload)}
 `.trim();
 
-  console.log(
-    `[generate_assets] start trace=${trace_id} activity_id=${activity_id} vertical=${vertical_key} channel=${channel}`
-  );
-
-  const model = pickString(payload?.model ?? meta?.model, DEFAULT_MODEL);
-
-  // 1) Cargar vertical profile
-  const vp0 = nowMs();
-  const profile = await fetchVerticalProfile(vertical_key, trace_id);
-  const vpLatency = nowMs() - vp0;
-
-  // 2) Llamar OpenAI con JSON estricto
-  const llm0 = nowMs();
-  const prompt = buildPrompt({ traceId: trace_id, vertical_key, context, profile });
-  const result = await callOpenAIJsonStrict({ model, traceId: trace_id, prompt });
-  const llmLatency = nowMs() - llm0;
-
-  // 3) Insert/Upsert en social_outputs (idempotente)
-  const db0 = nowMs();
-
-  // Nota: si aplicas el SQL de idempotencia que te dejo más abajo,
-  // tendrás columna activity_id generada desde meta, y unique(activity_id, channel, vertical_key).
-  // Aquí ponemos meta.activity_id SIEMPRE.
-  const insertRow: any = {
-    // (si tu tabla tiene org_id / lead_id, inclúyelos si existen; si no, no pasa nada)
-    org_id: payload?.org_id ?? payload?.orgId ?? meta?.org_id ?? meta?.orgId ?? null,
-    lead_id: payload?.lead_id ?? payload?.leadId ?? meta?.lead_id ?? meta?.leadId ?? null,
-
-    status: "draft",
-    channel,
-    vertical_key,
-
-    title: result.title,
-    hook: result.hook,
-    caption: result.caption,
-    hashtags: result.hashtags,
-    cta: result.cta,
-    image_prompts: result.image_prompts,
-
-    assets: [],
-
-    meta: {
-      ...(typeof meta === "object" && meta ? meta : {}),
-      activity_id: activity_id ?? null,
-      trace_id,
-      model
-    }
+  // 4) Schema expected by your DB columns (title, hook, caption, hashtags, cta, image_prompts, assets)
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["title", "hook", "caption", "hashtags", "cta", "image_prompts"],
+    properties: {
+      title: { type: "string" },
+      hook: { type: "string" },
+      caption: { type: "string" },
+      cta: { type: "string" },
+      hashtags: { type: "array", items: { type: "string" } },
+      image_prompts: { type: "object" }, // keep flexible
+      assets: { type: "object" },        // optional / flexible
+    },
   };
 
-  // UPSERT: requiere unique(activity_id, channel, vertical_key) (te lo doy en SQL)
-  const { data: out, error: outErr } = await supabase
-    .from("social_outputs")
-    .upsert(insertRow, {
-      onConflict: "activity_id,channel,vertical_key"
-    })
-    .select("id")
-    .maybeSingle();
+  // 5) OpenAI call
+  const out = await openaiResponsesJSON({
+    system,
+    user: userPrompt,
+    schema,
+    temperature: 0.4,
+  });
 
-  const dbLatency = nowMs() - db0;
+  // Normalize
+  const title = pickString(out?.title, "");
+  const hook = pickString(out?.hook, "");
+  const caption = pickString(out?.caption, "");
+  const cta = pickString(out?.cta, "");
+  const hashtags = Array.isArray(out?.hashtags) ? out.hashtags : [];
+  const image_prompts = out?.image_prompts ?? {};
+  const assets = out?.assets ?? {};
 
-  if (outErr) {
-    console.error(
-      `[generate_assets] upsert social_outputs failed trace=${trace_id} activity_id=${activity_id} db_ms=${dbLatency} err=${outErr.message}`
-    );
-    throw outErr;
+  // 6) Insert social_outputs
+  const metaOut = {
+    ...((payload?.meta ?? {}) as any),
+    activity_id,
+    job_id,
+    vertical_key,
+    channel,
+    source: "openai",
+  };
+
+  const { error: insErr } = await sb.from("social_outputs").insert({
+    org_id: act.org_id,
+    lead_id: act.lead_id,
+    vertical_key,
+    channel,
+    status: "draft",
+    title,
+    hook,
+    caption,
+    cta,
+    hashtags,
+    image_prompts,
+    assets,
+    meta: metaOut,
+    activity_id: String(activity_id), // your column is text in screenshots
+  });
+
+  if (insErr) {
+    throw new Error(`social_outputs insert error: ${insErr.message}`);
   }
 
-  const total = nowMs() - started;
-
-  // Observabilidad PRO (una línea fácil de grep)
-  console.log(
-    `[generate_assets] done trace=${trace_id} activity_id=${activity_id} output_id=${out?.id} model=${model} ` +
-      `vp_ms=${vpLatency} llm_ms=${llmLatency} db_ms=${dbLatency} total_ms=${total}`
-  );
-
-  return {
-    ok: true,
-    output_id: out?.id,
-    trace_id
-  };
+  return { ok: true };
 }
