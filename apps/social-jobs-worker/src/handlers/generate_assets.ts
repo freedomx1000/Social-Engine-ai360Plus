@@ -240,7 +240,6 @@ const schema = {
     image_prompts,
     assets,
     meta: metaOut,
-    activity_id: String(activity_id), // your column is text in screenshots
   });
 
   if (insErr) {
